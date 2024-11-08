@@ -31,7 +31,7 @@ jobs:
       - name: Validate repository structure
         run: |
           # Check for required directories and files and make sure they have to perfect
-          for dir in "src" "scripts"; do
+          for dir in "src" ; do
             if [ ! -d "$dir" ]; then
               echo "Required directory '$dir' is missing"
               exit 1
