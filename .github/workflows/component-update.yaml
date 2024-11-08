@@ -4,8 +4,8 @@ on:
   push:
     branches: [main]
     paths:
-      - 'src/**'      # Trigger only when source code changes
-      - 'package.xml' # Or your relevant package files
+      - 'src/**'      
+      - 'package.xml' 
   pull_request:
     branches: [main]
     paths:
@@ -15,7 +15,7 @@ on:
 env:
   DEPLOY_API_URL: "http://13.232.234.162:5000/api"
   UPDATE_TYPE: "component-update"
-  COMPONENT_NAME: "your_component_name" # Change this to your component name
+  COMPONENT_NAME: "docker container"
 
 permissions:
   contents: write
