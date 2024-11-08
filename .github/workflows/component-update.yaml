@@ -4,24 +4,44 @@ on:
   push:
     branches: [main]
     paths:
-      - 'src/**'      
-      - 'package.xml' 
+      - 'src/**'
+      - 'scripts/**'
+      - 'package.xml'
   pull_request:
     branches: [main]
     paths:
       - 'src/**'
+      - 'scripts/**'
       - 'package.xml'
 
 env:
   DEPLOY_API_URL: "http://13.232.234.162:5000/api"
-  UPDATE_TYPE: "component-update"
-  COMPONENT_NAME: "docker container"
+  UPDATE_TYPE: "component"
+  COMPONENT_NAME: "oro_git_ws"
+  GITHUB_REPO: "https://github.com/jayogmen/oro_git_ws.git"
 
 permissions:
   contents: write
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Validate repository structure
+        run: |
+          # Check for required directories and files
+          for dir in "src" "scripts"; do
+            if [ ! -d "$dir" ]; then
+              echo "Required directory '$dir' is missing"
+              exit 1
+            fi
+          done
+
   version:
+    needs: validate
     runs-on: ubuntu-latest
     outputs:
       new_version: ${{ steps.bump_version.outputs.new_version }}
@@ -31,22 +51,21 @@ jobs:
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
           
       - name: Get commit hash
         id: get_commit
         run: |
-          COMMIT_HASH=$(git rev-parse --short HEAD)
+          COMMIT_HASH=$(git rev-parse HEAD)
           echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
 
       - name: Get latest version
         id: get_latest_version
         run: |
-          LATEST_TAG=$(git tag -l "${{ env.COMPONENT_NAME }}-v*" | sort -V | tail -n 1)
+          LATEST_TAG=$(git tag -l "v*" | sort -V | tail -n 1)
           if [ -z "$LATEST_TAG" ]; then
             echo "current_version=0.1.0" >> $GITHUB_OUTPUT
           else
-            echo "current_version=${LATEST_TAG#${{ env.COMPONENT_NAME }}-v}" >> $GITHUB_OUTPUT
+            echo "current_version=${LATEST_TAG#v}" >> $GITHUB_OUTPUT
           fi
 
       - name: Bump version
@@ -61,11 +80,11 @@ jobs:
           if [ "${{ github.event_name }}" = "push" ]; then
             git config --local user.email "github-actions[bot]@users.noreply.github.com"
             git config --local user.name "github-actions[bot]"
-            git tag -a "${{ env.COMPONENT_NAME }}-v$NEW_VERSION" -m "Component Release version $NEW_VERSION"
-            git push origin "${{ env.COMPONENT_NAME }}-v$NEW_VERSION"
+            git tag -a "v$NEW_VERSION" -m "Release version $NEW_VERSION"
+            git push origin "v$NEW_VERSION"
           fi
 
-  analyze-changes:
+  analyze:
     needs: version
     runs-on: ubuntu-latest
     outputs:
@@ -76,67 +95,65 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Check modified files
+      - name: Analyze changes
         id: check-changes
         run: |
-          MODIFIED_FILES=$(git diff --name-only HEAD^ HEAD | grep "^src/" | jq -R -s -c 'split("\n")[:-1]')
+          MODIFIED_FILES=$(git diff --name-only HEAD^ HEAD | jq -R -s -c 'split("\n")[:-1]')
           echo "modified_files=$MODIFIED_FILES" >> $GITHUB_OUTPUT
 
   deploy:
-    needs: [version, analyze-changes]
+    needs: [version, analyze]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - name: Create Component Package
+      - name: Create deployment package
         run: |
-          echo "Creating metadata for component update..."
-          
-          # Create update metadata
-          cat > update_metadata.json << EOL
+          # Create metadata for the update
+          cat > metadata.json << EOL
           {
-            "component": "${{ env.COMPONENT_NAME }}",
+            "buildTime": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "gitCommit": "${{ needs.version.outputs.commit_hash }}",
+            "branch": "main",
+            "workflow": "component-update",
             "version": "${{ needs.version.outputs.new_version }}",
-            "commit": "${{ needs.version.outputs.commit_hash }}",
-            "modified_files": ${{ needs.analyze-changes.outputs.modified_files }},
-            "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            "modifiedFiles": ${{ needs.analyze.outputs.modified_files }}
           }
           EOL
 
-      - name: Deploy Component Update
+      - name: Deploy to OTA server
         run: |
-          # Prepare payload for OTA server
-          REPO_URL="${{ github.server_url }}/${{ github.repository }}"
-          
           PAYLOAD='{
             "projectName": "ota_update",
             "artifactId": "${{ env.COMPONENT_NAME }}",
             "version": "${{ needs.version.outputs.new_version }}",
-            "url": "'$REPO_URL'",
+            "url": "${{ env.GITHUB_REPO }}",
             "updateType": "${{ env.UPDATE_TYPE }}",
-            "metadata": {
-              "commitHash": "${{ needs.version.outputs.commit_hash }}",
-              "branch": "main",
-              "modifiedFiles": '${{ needs.analyze-changes.outputs.modified_files }}'
-            }
+            "metadata": '"$(cat metadata.json)"'
           }'
           
-          echo "Deploying component update..."
-          DEPLOY_STATUS=$(curl -s -X POST \
+          echo "Deploying update to OTA server..."
+          
+          RESPONSE=$(curl -s -X POST \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD" \
-            -w "%{http_code}" \
-            -o /tmp/deploy_response.txt \
+            -w "\n%{http_code}" \
             ${{ env.DEPLOY_API_URL }}/saveArtifact)
           
-          cat /tmp/deploy_response.txt
-          if [ "$DEPLOY_STATUS" != "200" ]; then
-            echo "Deployment failed with status: $DEPLOY_STATUS"
+          HTTP_STATUS=$(echo "$RESPONSE" | tail -n 1)
+          RESPONSE_BODY=$(echo "$RESPONSE" | head -n -1)
+          
+          echo "Response: $RESPONSE_BODY"
+          echo "Status code: $HTTP_STATUS"
+          
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "Deployment failed"
             exit 1
           fi
+          
           echo "Component update deployment successful"
 
-      - name: Upload Metadata
-        uses: actions/upload-artifact@v2
+      - name: Upload metadata
+        uses: actions/upload-artifact@v3
         with:
           name: update-metadata
-          path: update_metadata.json
+          path: metadata.json
