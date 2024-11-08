@@ -14,7 +14,7 @@ on:
 
 env:
   DEPLOY_API_URL: "http://13.232.234.162:5000/api"
-  UPDATE_TYPE: "component-update"
+  UPDATE_TYPE: "component"
   COMPONENT_NAME: "oro_git_ws"
   GITHUB_REPO: "https://github.com/jayogmen/oro_git_ws.git"
 
@@ -30,6 +30,7 @@ jobs:
         
       - name: Validate repository structure
         run: |
+          # Check for required directories and files and make sure they have to perfect
           for dir in "src" ; do
             if [ ! -d "$dir" ]; then
               echo "Required directory '$dir' is missing"
@@ -44,7 +45,8 @@ jobs:
       new_version: ${{ steps.bump_version.outputs.new_version }}
       commit_hash: ${{ steps.get_commit.outputs.commit_hash }}
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
         with:
           fetch-depth: 0
           
@@ -80,20 +82,39 @@ jobs:
             git push origin "v$NEW_VERSION"
           fi
 
+  analyze:
+    needs: version
+    runs-on: ubuntu-latest
+    outputs:
+      modified_files: ${{ steps.check-changes.outputs.modified_files }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 2
+
+      - name: Analyze changes
+        id: check-changes
+        run: |
+          MODIFIED_FILES=$(git diff --name-only HEAD^ HEAD | jq -R -s -c 'split("\n")[:-1]')
+          echo "modified_files=$MODIFIED_FILES" >> $GITHUB_OUTPUT
+
   deploy:
-    needs: [version]
+    needs: [version, analyze]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - name: Create deployment package
         run: |
+          # Create metadata for the update
           cat > metadata.json << EOL
           {
             "buildTime": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
             "gitCommit": "${{ needs.version.outputs.commit_hash }}",
             "branch": "main",
             "workflow": "component-update",
-            "version": "${{ needs.version.outputs.new_version }}"
+            "version": "${{ needs.version.outputs.new_version }}",
+            "modifiedFiles": ${{ needs.analyze.outputs.modified_files }}
           }
           EOL
 
@@ -108,6 +129,8 @@ jobs:
             "metadata": '"$(cat metadata.json)"'
           }'
           
+          echo "Deploying update to OTA server..."
+          
           RESPONSE=$(curl -s -X POST \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD" \
@@ -117,8 +140,18 @@ jobs:
           HTTP_STATUS=$(echo "$RESPONSE" | tail -n 1)
           RESPONSE_BODY=$(echo "$RESPONSE" | head -n -1)
           
+          echo "Response: $RESPONSE_BODY"
+          echo "Status code: $HTTP_STATUS"
+          
           if [ "$HTTP_STATUS" != "200" ]; then
-            echo "Deployment failed with status: $HTTP_STATUS"
-            echo "Response: $RESPONSE_BODY"
+            echo "Deployment failed"
             exit 1
           fi
+          
+          echo "Component update deployment successful"
+
+      - name: Upload metadata
+        uses: actions/upload-artifact@v3
+        with:
+          name: update-metadata
+          path: metadata.json

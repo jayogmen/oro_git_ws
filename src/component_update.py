@@ -69,7 +69,7 @@ class ComponentUpdateClient:
     COMPONENT_PATH = "/opt/ota-client/components"
 
     def __init__(self):
-        self.device_id = os.getenv("DEVICE_ID", "device-10")
+        self.device_id = os.getenv("DEVICE_ID", "device-1")
         self.project_name = os.getenv("PROJECT_NAME", "ota-application")
         self.api_base_url = os.getenv("API_URL", "http://13.232.234.162:5000/api")
         self.component_name = os.getenv("COMPONENT_NAME", "oro_git_ws")
