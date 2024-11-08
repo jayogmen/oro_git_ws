@@ -5,13 +5,11 @@ on:
     branches: [main]
     paths:
       - 'src/**'
-      # - 'scripts/**'
       - 'package.xml'
   pull_request:
     branches: [main]
     paths:
       - 'src/**'
-      # - 'scripts/**'
       - 'package.xml'
 
 env:
