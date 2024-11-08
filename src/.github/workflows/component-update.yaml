@@ -1,0 +1,142 @@
+name: OTA Component Update Deployment
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'      # Trigger only when source code changes
+      - 'package.xml' # Or your relevant package files
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'package.xml'
+
+env:
+  DEPLOY_API_URL: "http://13.232.234.162:5000/api"
+  UPDATE_TYPE: "component-update"
+  COMPONENT_NAME: "your_component_name" # Change this to your component name
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.bump_version.outputs.new_version }}
+      commit_hash: ${{ steps.get_commit.outputs.commit_hash }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Get commit hash
+        id: get_commit
+        run: |
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+
+      - name: Get latest version
+        id: get_latest_version
+        run: |
+          LATEST_TAG=$(git tag -l "${{ env.COMPONENT_NAME }}-v*" | sort -V | tail -n 1)
+          if [ -z "$LATEST_TAG" ]; then
+            echo "current_version=0.1.0" >> $GITHUB_OUTPUT
+          else
+            echo "current_version=${LATEST_TAG#${{ env.COMPONENT_NAME }}-v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Bump version
+        id: bump_version
+        run: |
+          CURRENT_VERSION=${{ steps.get_latest_version.outputs.current_version }}
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+          NEW_PATCH=$((PATCH + 1))
+          NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          
+          if [ "${{ github.event_name }}" = "push" ]; then
+            git config --local user.email "github-actions[bot]@users.noreply.github.com"
+            git config --local user.name "github-actions[bot]"
+            git tag -a "${{ env.COMPONENT_NAME }}-v$NEW_VERSION" -m "Component Release version $NEW_VERSION"
+            git push origin "${{ env.COMPONENT_NAME }}-v$NEW_VERSION"
+          fi
+
+  analyze-changes:
+    needs: version
+    runs-on: ubuntu-latest
+    outputs:
+      modified_files: ${{ steps.check-changes.outputs.modified_files }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 2
+
+      - name: Check modified files
+        id: check-changes
+        run: |
+          MODIFIED_FILES=$(git diff --name-only HEAD^ HEAD | grep "^src/" | jq -R -s -c 'split("\n")[:-1]')
+          echo "modified_files=$MODIFIED_FILES" >> $GITHUB_OUTPUT
+
+  deploy:
+    needs: [version, analyze-changes]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create Component Package
+        run: |
+          echo "Creating metadata for component update..."
+          
+          # Create update metadata
+          cat > update_metadata.json << EOL
+          {
+            "component": "${{ env.COMPONENT_NAME }}",
+            "version": "${{ needs.version.outputs.new_version }}",
+            "commit": "${{ needs.version.outputs.commit_hash }}",
+            "modified_files": ${{ needs.analyze-changes.outputs.modified_files }},
+            "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          }
+          EOL
+
+      - name: Deploy Component Update
+        run: |
+          # Prepare payload for OTA server
+          REPO_URL="${{ github.server_url }}/${{ github.repository }}"
+          
+          PAYLOAD='{
+            "projectName": "ota_update",
+            "artifactId": "${{ env.COMPONENT_NAME }}",
+            "version": "${{ needs.version.outputs.new_version }}",
+            "url": "'$REPO_URL'",
+            "updateType": "${{ env.UPDATE_TYPE }}",
+            "metadata": {
+              "commitHash": "${{ needs.version.outputs.commit_hash }}",
+              "branch": "main",
+              "modifiedFiles": '${{ needs.analyze-changes.outputs.modified_files }}'
+            }
+          }'
+          
+          echo "Deploying component update..."
+          DEPLOY_STATUS=$(curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            -w "%{http_code}" \
+            -o /tmp/deploy_response.txt \
+            ${{ env.DEPLOY_API_URL }}/saveArtifact)
+          
+          cat /tmp/deploy_response.txt
+          if [ "$DEPLOY_STATUS" != "200" ]; then
+            echo "Deployment failed with status: $DEPLOY_STATUS"
+            exit 1
+          fi
+          echo "Component update deployment successful"
+
+      - name: Upload Metadata
+        uses: actions/upload-artifact@v2
+        with:
+          name: update-metadata
+          path: update_metadata.json
