@@ -70,6 +70,7 @@ class ComponentUpdateClient:
 
     def __init__(self):
         self.device_id = os.getenv("DEVICE_ID", "device-10")
+        self.project_name = os.getenv("PROJECT_NAME", "ota-application")
         self.api_base_url = os.getenv("API_URL", "http://13.232.234.162:5000/api")
         self.component_name = os.getenv("COMPONENT_NAME", "oro_git_ws")
         
@@ -188,7 +189,7 @@ class ComponentUpdateClient:
 
     def check_for_updates(self) -> None:
         try:
-            url = f"{self.api_base_url}/checkForUpdate/{self.device_id}/ota_update"
+            url = f"{self.api_base_url}/checkForUpdate/{self.device_id}/{self.project_name}/{self.current_version.version}"
             self.logger.info(f"Checking for updates: {url}")
             
             response = self.session.get(url, timeout=(5, 15))
@@ -219,6 +220,7 @@ class ComponentUpdateClient:
     def run(self) -> None:
         self.logger.info("Starting OTA component update client...")
         self.logger.info(f"Device ID: {self.device_id}")
+        self.logger.info(f"Project: {self.project_name}")
         self.logger.info(f"Component: {self.component_name}")
         self.logger.info(f"Current version: {self.current_version.version}")
         
