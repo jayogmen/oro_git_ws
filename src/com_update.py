@@ -70,7 +70,7 @@ class ComponentUpdateClient:
 
     def __init__(self):
         self.device_id = os.getenv("DEVICE_ID", "device-10")
-        self.project_name = os.getenv("PROJECT_NAME", "component-updates")
+        self.project_name = os.getenv("PROJECT_NAME", "ota_update")
         self.api_base_url = os.getenv("API_URL", "http://13.232.234.162:5000/api")
         self.component_name = os.getenv("COMPONENT_NAME", "oro_git_ws")
         
@@ -140,47 +140,95 @@ class ComponentUpdateClient:
         except Exception as e:
             self.logger.error(f"Error saving version file: {e}")
 
-    def _apply_component_update(self, update_info: UpdateResponse) -> None:
+    def _update_or_clone_repository(self, update_info: UpdateResponse) -> None:
         try:
             if not update_info.data:
                 self.logger.error("Update info contains no data")
                 return
 
-            # Prepare the component directory
             component_dir = Path(self.COMPONENT_PATH) / self.component_name
-            if component_dir.exists():
-                shutil.rmtree(component_dir)
+            
+            try:
+                # Check if repository already exists
+                if component_dir.exists():
+                    self.logger.info("Repository exists, performing update")
+                    repo = git.Repo(component_dir)
+                    
+                    # Fetch all changes
+                    self.logger.info("Fetching updates from remote")
+                    repo.remotes.origin.fetch()
+                    
+                    # Check if the remote URL needs to be updated
+                    current_url = repo.remotes.origin.url
+                    if current_url != update_info.data.artifactUrl:
+                        self.logger.info(f"Updating remote URL from {current_url} to {update_info.data.artifactUrl}")
+                        repo.remotes.origin.set_url(update_info.data.artifactUrl)
+                    
+                    # Ensure we're on the main branch
+                    if repo.active_branch.name != 'main':
+                        self.logger.info("Switching to main branch")
+                        repo.git.checkout('main')
+                    
+                    # Pull latest changes
+                    repo.remotes.origin.pull()
+                    
+                else:
+                    # Clone the repository if it doesn't exist
+                    self.logger.info(f"Cloning repository from {update_info.data.artifactUrl}")
+                    repo = git.Repo.clone_from(
+                        update_info.data.artifactUrl,
+                        component_dir,
+                        branch='main'
+                    )
 
-            # Clone the repository
-            self.logger.info(f"Cloning repository from {update_info.data.artifactUrl}")
-            repo = git.Repo.clone_from(
-                update_info.data.artifactUrl,
-                component_dir,
-                branch='main'
-            )
+                # Checkout the specific commit if provided
+                if update_info.data.latestSHA:
+                    self.logger.info(f"Checking out specific commit: {update_info.data.latestSHA}")
+                    repo.git.checkout(update_info.data.latestSHA)
 
-            # Checkout the specific commit
-            if update_info.data.latestSHA:
-                repo.git.checkout(update_info.data.latestSHA)
+                # Run post-update scripts if they exist
+                post_update_script = component_dir / "scripts" / "post_update.sh"
+                if post_update_script.exists():
+                    self.logger.info("Running post-update script")
+                    os.chmod(post_update_script, 0o755)
+                    result = os.system(str(post_update_script))
+                    if result != 0:
+                        raise Exception(f"Post-update script failed with exit code {result}")
 
-            # Run post-update scripts if they exist
-            post_update_script = component_dir / "scripts" / "post_update.sh"
-            if post_update_script.exists():
-                self.logger.info("Running post-update script")
-                os.chmod(post_update_script, 0o755)
-                result = os.system(str(post_update_script))
-                if result != 0:
-                    raise Exception(f"Post-update script failed with exit code {result}")
+                # Update version information
+                if update_info.data.metadata:
+                    new_version = Version(
+                        version=update_info.data.latestSHA,
+                        metadata=update_info.data.metadata
+                    )
+                    self._save_current_version(new_version)
+                    self.current_version = new_version
 
-            self.logger.info("Component update completed successfully")
+                self.logger.info("Component update completed successfully")
+
+            except git.GitCommandError as git_error:
+                self.logger.error(f"Git operation failed: {git_error}")
+                # If there are local changes or other git-related issues, 
+                # remove the directory and clone fresh
+                if component_dir.exists():
+                    self.logger.info("Removing existing repository due to git error")
+                    shutil.rmtree(component_dir)
+                # Retry the clone operation
+                self.logger.info("Retrying with fresh clone")
+                repo = git.Repo.clone_from(
+                    update_info.data.artifactUrl,
+                    component_dir,
+                    branch='main'
+                )
+                if update_info.data.latestSHA:
+                    repo.git.checkout(update_info.data.latestSHA)
 
         except Exception as e:
-            self.logger.error(f"Failed to apply component update: {e}")
+            self.logger.error(f"Failed to update/clone repository: {e}")
             raise
 
     def check_for_updates(self) -> None:
         try:
-            # Including the current version in the API call
             url = f"{self.api_base_url}/checkForUpdate/{self.device_id}/{self.project_name}/{self.current_version.version}"
             self.logger.info(f"Checking for updates: {url}")
             
@@ -188,13 +236,11 @@ class ComponentUpdateClient:
             response.raise_for_status()
             
             update_info = UpdateResponse.from_dict(response.json())
-            print("*******************************************")
-            print(update_info)
-            print("*******************************************")
+
             
-            if update_info.status and update_info.data and update_info.data.updateType == "component":
+            if update_info.status and update_info.data and update_info.data.updateType == "component-update":
                 self.logger.info("Component update available, proceeding to apply it.")
-                self._apply_component_update(update_info)
+                self._update_or_clone_repository(update_info)
             else:
                 self.logger.info(f"No component update available: {update_info.message}")
                 
