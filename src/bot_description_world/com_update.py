@@ -64,7 +64,7 @@ class UpdateResponse:
 
 class ComponentUpdateClient:
     VERSION_FILE = "/opt/ota-client/current_version.json"
-    COMPONENT_PATH = "/opt/ota-client/components"
+    COMPONENT_PATH = "/root"
     UPDATE_CHECK_INTERVAL = 300  # 5 minutes
 
     def __init__(self):
@@ -139,6 +139,62 @@ class ComponentUpdateClient:
         except Exception as e:
             self.logger.error(f"Error saving version file: {e}")
 
+    def _get_changed_packages(self, repo, old_commit, new_commit) -> set:
+        """Get the list of ROS packages that have changed between commits"""
+        try:
+            # Get the diff between commits
+            diff = repo.git.diff(f"{old_commit}..{new_commit}", name-only=True).split('\n')
+            
+            # Find all package.xml files in the repository
+            package_files = []
+            for root, _, files in os.walk(repo.working_dir):
+                if 'package.xml' in files:
+                    package_files.append(os.path.relpath(root, repo.working_dir))
+            
+            # Check which packages have changes
+            changed_packages = set()
+            for changed_file in diff:
+                if changed_file:  # Skip empty lines
+                    changed_path = os.path.dirname(changed_file)
+                    # Check if this file is under any package directory
+                    for package_path in package_files:
+                        if changed_path.startswith(package_path):
+                            changed_packages.add(package_path)
+                            break
+            
+            return changed_packages
+        except Exception as e:
+            self.logger.error(f"Error determining changed packages: {e}")
+            # If we can't determine changes, return empty set
+            return set()
+
+    def _run_colcon_build(self, repo_path: str, packages: set = None):
+        """Run colcon build for specific packages"""
+        try:
+            build_cmd = ["colcon", "build"]
+            if packages:
+                # Build only specific packages
+                packages_str = " ".join(f"--packages-select {pkg}" for pkg in packages)
+                build_cmd.extend(packages_str.split())
+            
+            # Change to repository directory
+            original_dir = os.getcwd()
+            os.chdir(repo_path)
+            
+            self.logger.info(f"Running colcon build command: {' '.join(build_cmd)}")
+            result = os.system(" ".join(build_cmd))
+            
+            if result != 0:
+                raise Exception(f"Colcon build failed with exit code {result}")
+            
+            self.logger.info("Colcon build completed successfully")
+        except Exception as e:
+            self.logger.error(f"Error during colcon build: {e}")
+            raise
+        finally:
+            # Always return to original directory
+            os.chdir(original_dir)
+
     def _check_and_update_repository(self, update_info: UpdateResponse) -> None:
         try:
             if not update_info.data:
@@ -152,6 +208,9 @@ class ComponentUpdateClient:
                 # Try to open existing repository
                 repo = git.Repo(repo_path)
                 self.logger.info("Found existing repository")
+                
+                # Store the current commit before update
+                old_commit = repo.head.commit
                 
                 # Update remote URL if needed
                 if repo.remotes.origin.url != update_info.data.artifactUrl:
@@ -171,6 +230,15 @@ class ComponentUpdateClient:
                     self.logger.info("Updates found. Pulling changes...")
                     origin.pull()
                     self.logger.info("Updates downloaded successfully")
+                    
+                    # Get list of changed packages
+                    changed_packages = self._get_changed_packages(repo, old_commit, repo.head.commit)
+                    if changed_packages:
+                        self.logger.info(f"Changed packages detected: {changed_packages}")
+                        # Run colcon build only for changed packages
+                        self._run_colcon_build(repo_path, changed_packages)
+                    else:
+                        self.logger.info("No ROS packages were modified in this update")
                 else:
                     self.logger.info("Repository is up to date")
 
@@ -185,6 +253,8 @@ class ComponentUpdateClient:
                     branch='main'
                 )
                 self.logger.info("Repository cloned successfully")
+                # For fresh clone, build all packages
+                self._run_colcon_build(repo_path)
 
             # Update version information
             if update_info.data.metadata:
